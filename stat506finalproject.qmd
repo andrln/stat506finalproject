@@ -1,0 +1,219 @@
+---
+title: "stat506finalproject"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+library(tidyverse)
+library(conflicted)
+library(survey)
+library(spatstat)
+library(jtools)
+#library(svydiags)
+library(nrba)
+conflicts_prefer(dplyr::select)
+```
+
+You can add options to executable code like this
+
+```{r}
+df = read.csv("cbecs2018_final_public(1).csv")
+df = as_tibble(df)
+df = df %>%
+  select(PUBID, RFCNS, WLCNS, ELHTBTU, NGHTBTU, MFHTBTU, FKHTBTU, DHHTBTU, PUBCLIM, FACACT, SQFT, HEATP, PKLT, PKLTINOUT, starts_with('FINALWT'))
+df = df %>%
+  rename(id = PUBID, roof = RFCNS, wall = WLCNS, elec_heating = ELHTBTU, majorfuels_heating = MFHTBTU, naturalgas_heating = NGHTBTU, fuel_heating = FKHTBTU, district_heating = DHHTBTU, climate = PUBCLIM, building_type = FACACT, sqft = SQFT, percent_heated = HEATP, parking = PKLT, indoor_parking = PKLTINOUT)
+df = df %>% replace(is.na(.), 0)
+df = df %>% mutate(total_heating = elec_heating + majorfuels_heating + naturalgas_heating + fuel_heating + district_heating) 
+df = df %>% mutate(total_heating_adjusted = total_heating/sqft)
+df = dplyr::filter(df, building_type != 0)
+df = df %>% mutate(parking = na_if(parking, NA)
+                   %>% coalesce(50))
+df = df %>% mutate(parking = na_if(indoor_parking, NA)
+                   %>% coalesce(50))
+df = dplyr::filter(df, building_type != 6 & building_type != 14 & building_type != 13)
+df = df %>% mutate(roof = as.factor(roof), wall = as.factor(wall), climate = as.factor(climate), building_type = as.factor(building_type), parking = as.factor(parking), indoor_parking = as.factor(indoor_parking))
+samp_wts<-df$FINALWT
+rep_wts<-df[, grepl("^FINALWT", names(df))]
+rep_wts$FINALWT<-NULL
+samp_design<-svrepdesign(weights=samp_wts, repweights=rep_wts,
+type="JK2", mse=TRUE, data=df)
+```
+
+```{r}
+#create 2 dataframes, 1 for buildings with no/outdoor parking and buildigns which do have indoor parking
+df_noparking = df %>% dplyr::filter(indoor_parking == 2 | parking == 2)
+df_parking = df %>% dplyr::filter((indoor_parking == 1 | indoor_parking == 3) | parking == 1)
+
+samp_wts<-df_parking$FINALWT
+rep_wts<-df_parking[, grepl("^FINALWT", names(df_parking))]
+rep_wts$FINALWT<-NULL
+samp_design_parking <-svrepdesign(weights=samp_wts, repweights=rep_wts,
+type="JK2", mse=TRUE, data=df_parking)
+
+samp_wts<-df_noparking$FINALWT
+rep_wts<-df_noparking[, grepl("^FINALWT", names(df_noparking))]
+rep_wts$FINALWT<-NULL
+samp_design_noparking <-svrepdesign(weights=samp_wts, repweights=rep_wts,
+type="JK2", mse=TRUE, data=df_noparking)
+```
+
+```{r}
+hist(df$percent_heated, breaks=100)
+```
+
+```{r}
+#all variables
+all_variables = svyglm(percent_heated ~ total_heating + roof + wall + climate + building_type + sqft, design = samp_design)
+summ(all_variables)
+all_variables$aic
+```
+
+```{r}
+#all variables with total heating adjusted by sqft
+adjusted_all = svyglm(percent_heated ~ total_heating_adjusted + roof + wall + climate + building_type, design = samp_design)
+summ(adjusted_all)
+adjusted_all$aic
+```
+
+```{r}
+#very high heteroskedasticity, caused by dependent variable being in percentage format and thus capped at 100 and 0
+res = resid(adjusted_all)
+plot(fitted(adjusted_all), res, main="Residuals vs Fitted Values", xlab = "Fitted Values", ylab = "Residuals")
+abline(0,0)
+max(fitted(adjusted_all))
+fitted(adjusted_all)[which.max(fitted(adjusted_all))]
+df[which.max(fitted(adjusted_all)), ]
+```
+
+```{r}
+#quick bandaid fix of capping predicted values at 100 to see if this improves the fit, no predicted values were <0 so I do not bother to create a floor as well
+adjusted_all_capped = adjusted_all
+adjusted_all_capped$fitted.values = pmin(adjusted_all_capped$fitted.values, 100)
+summ(adjusted_all_capped)
+res = resid(adjusted_all_capped)
+plot(fitted(adjusted_all_capped), res, main="Residuals vs Fitted Values with Fitted capped to 100", xlab = "Fitted Values", ylab = "Residuals")
+abline(0,0)
+```
+
+```{r}
+#just adjusted heating
+adjusted_heating = svyglm(percent_heated ~ total_heating_adjusted, design=samp_design)
+summ(adjusted_heating)
+adjusted_heating$aic
+```
+
+```{r}
+res = resid(adjusted_heating)
+plot(fitted(adjusted_heating), res)
+abline(0,0)
+max(fitted(adjusted_heating))
+fitted(adjusted_heating)[which.max(fitted(adjusted_heating))]
+df[which.max(fitted(adjusted_heating)), ]
+```
+
+```{r}
+adjusted_heating_capped = adjusted_heating
+adjusted_heating_capped$fitted.values = pmin(adjusted_heating_capped$fitted.values, 100)
+summ(adjusted_heating_capped)
+res = resid(adjusted_heating_capped)
+plot(fitted(adjusted_heating_capped), res)
+abline(0,0)
+```
+
+```{r}
+#stepwise
+stepwise_model = stepwise_model_selection(samp_design, 'percent_heated', predictor_variables = c('roof', 'wall', 'elec_heating', 'naturalgas_heating', 'majorfuels_heating', 'fuel_heating', 'district_heating', 'climate', 'building_type', 'sqft'), model_type = 'normal')
+summ(stepwise_model)
+```
+
+```{r}
+#due to the dependent variable being a proportion, linear regression assumptiosn are not met. ideally we should use beta regression, but cannot do that with the svyglm package, so instead transform dependent variable to a binary one and use log regression
+df = df %>% mutate(percent_heated_binary = ifelse(percent_heated > 80, 1, 0))
+samp_wts<-df$FINALWT
+rep_wts<-df[, grepl("^FINALWT", names(df))]
+rep_wts$FINALWT<-NULL
+samp_design<-svrepdesign(weights=samp_wts, repweights=rep_wts,
+type="JK2", mse=TRUE, data=df)
+```
+
+```{r}
+ggplot(df, aes(x = factor(percent_heated_binary))) +
+  geom_bar(stat = "count", fill = "blue") +
+  labs(x = "Percent Heated Binary", y = "Count", title = "Above 80% of building heated above 50f")
+#percentage of positives is 80%, meaning there is significant class imbalance
+#nrow(df[df['percent_heated_binary'] == TRUE, ]) / nrow(df)
+```
+
+```{r}
+library(Metrics)
+library(MLmetrics)
+conflicts_prefer(Metrics::auc)
+```
+
+```{r}
+#all variables
+all_variables = svyglm(percent_heated_binary ~ total_heating + roof + wall + climate + building_type + sqft, family = quasibinomial, design = samp_design)
+summary(all_variables)
+print('psrsq:')
+psrsq(all_variables)
+print('PRauc:')
+PRAUC(fitted(all_variables), df$percent_heated_binary)
+```
+
+```{r}
+#all variables with total heating adjusted by sqft
+all_variables_adjusted = svyglm(percent_heated_binary ~ total_heating_adjusted + roof + wall + climate + building_type, family = quasibinomial, design = samp_design)
+summary(all_variables_adjusted)
+print('psrsq:')
+psrsq(all_variables_adjusted)
+print('PRauc:')
+PRAUC(fitted(all_variables_adjusted), df$percent_heated_binary)
+```
+
+```{r}
+#just total heating adjusted
+adjusted_heating = svyglm(percent_heated_binary ~ total_heating_adjusted, family = quasibinomial, design = samp_design)
+summary(adjusted_heating)
+print('psrsq:')
+psrsq(adjusted_heating)
+print('PRauc:')
+PRAUC(fitted(adjusted_heating), df$percent_heated_binary)
+```
+
+```{r}
+#total heating adjusted and building_type
+adjusted_heating_c = svyglm(percent_heated_binary ~ total_heating_adjusted + building_type, family = quasibinomial, design = samp_design)
+summary(adjusted_heating_c)
+print('psrsq:')
+psrsq(adjusted_heating_c)
+print('PRauc:')
+PRAUC(fitted(adjusted_heating_c), df$percent_heated_binary)
+```
+
+```{r}
+#without total heating adjusted
+without_total = svyglm(percent_heated_binary ~ roof + wall + climate + building_type, family = quasibinomial, design = samp_design)
+summary(without_total)
+print('psrsq:')
+psrsq(without_total)
+print('PRauc:')
+PRAUC(fitted(without_total), df$percent_heated_binary)
+```
+
+```{r}
+#table of results
+results = data.frame(all_variables = PRAUC(fitted(all_variables), df$percent_heated_binary), all_variables_adjusted = PRAUC(fitted(all_variables_adjusted), df$percent_heated_binary), adjusted_total_heating = PRAUC(fitted(adjusted_heating), df$percent_heated_binary), adjusted_total_heating_and_building_type = PRAUC(fitted(adjusted_heating_c), df$percent_heated_binary), without_adjusted_total_heating = PRAUC(fitted(without_total), df$percent_heated_binary))
+row.names(results) = "PRAUC"
+results
+view(results)
+```
